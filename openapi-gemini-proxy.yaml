@@ -1,0 +1,83 @@
+swagger: '2.0'
+info:
+  title: Gemini Proxy API via Gateway
+  description: Handles CORS and proxies requests to the Gemini Cloud Function.
+  version: v1.0.0
+schemes:
+  - https
+produces:
+  - application/json
+
+# x-google-backend は、このAPI Gatewayを経由したリクエストが最終的にどこへ向かうか、
+# そしてその際にAPI Gatewayがどのように認証を行うかを定義します。
+x-google-backend:
+  # Cloud FunctionのトリガーURL
+  address: https://asia-northeast1-gen-lang-client-0960499209.cloudfunctions.net/geminiProxyHttp
+  # API GatewayがCloud Functionを呼び出す際に使用するIDトークンの'audience'。
+  # Cloud Function側が期待するaudience（通常はCloud Function自身のURL）と一致させます。
+  jwt_audience: https://asia-northeast1-gen-lang-client-0960499209.cloudfunctions.net/geminiProxyHttp
+  # path_translation: CONSTANT_ADDRESS # バックエンドURLのパス部分は固定し、Gatewayのパスは無視する設定
+
+paths:
+  # Vue.jsアプリからは、API GatewayのURL + このパス (例: /proxy) を呼び出します。
+  /proxy: # パス名は任意です。例えば /gemini や /score などでもOK。
+    options:
+      summary: CORS preflight check
+      operationId: corsProxyPreflight
+      # o3さんの指摘ポイント②: OPTIONSリクエストは認証をバイパスし、API Gatewayが直接応答します。
+      x-google-backend:
+        disable_auth: true # このOPTIONSリクエストではバックエンドへの認証を行わない
+      responses:
+        '204':
+          description: No Content. CORS preflight check passed.
+          # 必要なCORSレスポンスヘッダーは x-google-extensions: cors で設定
+      # o3さんの指摘ポイント① (allowCorsはAPI定義レベルでもパスオペレーションレベルでもOK)
+      # API GatewayのCORS拡張機能を使ってCORSポリシーを定義
+      x-google-extensions:
+        cors:
+          allowOrigins:
+            - "http://localhost:5173" # 開発中のVueアプリのオリジン
+            # - "https://your-production-app.com" # 本番環境のVueアプリのオリジンも追加
+          allowMethods: # 実際に許可するメソッド
+            - "POST"
+            - "OPTIONS"
+          allowHeaders: # 実際に許可するリクエストヘッダー
+            - "Content-Type"
+            # - "Authorization" # ★o3さんのアドバイスに基づき、クライアントからは送らない想定
+          allowCredentials: false # ★Authorizationヘッダーをクライアントから送らないのでfalse
+          maxAge: "3600"
+
+    post:
+      summary: Proxies request to the Gemini Cloud Function
+      operationId: callGeminiProxyViaGateway
+      # security: [] # ★o3さんのアドバイスに基づき、クライアントからのIDトークンは不要とする
+                      # API GatewayからCloud Functionへの認証は x-google-backend と
+                      # API Config作成時の backend-auth-service-account で行います。
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object # Vueアプリから送られてくるリクエストボディのスキーマ
+            properties:
+              contents:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    parts:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          text:
+                            type: string
+      responses:
+        '200':
+          description: Success response from the Gemini Cloud Function
+          schema:
+            type: object # Cloud Functionからのレスポンスボディのスキーマ
+        '403':
+          description: Forbidden (e.g., API Gateway failed to call Cloud Function)
+        '500':
+          description: Internal Server Error
